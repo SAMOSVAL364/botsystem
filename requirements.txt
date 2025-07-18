@@ -1,0 +1,3 @@
+python-telegram-bot==20.3
+python-dotenv==1.0.0
+sqlite3==2.6.0  # Для работы с базой данных
