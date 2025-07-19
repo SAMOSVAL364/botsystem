@@ -1,6 +1,6 @@
 import os
 import logging
-import sqlite3
+import psycopg2
 from pathlib import Path
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
 from telegram.ext import (
@@ -13,115 +13,131 @@ from telegram.ext import (
 )
 from dotenv import load_dotenv
 
-# --- НАСТРОЙКА ПУТЕЙ --- #
-BOT_DIR = Path("C:/Users/Максим/Desktop/botsystem")
-DB_PATH = BOT_DIR / "petshop.db"
-ENV_PATH = BOT_DIR / ".env"
-
-# --- ЗАГРУЗКА КОНФИГУРАЦИИ --- #
-load_dotenv(ENV_PATH)
-TOKEN = os.getenv("TOKEN")
-# Список администраторов
-ADMINS = [5634800132, 5515360616]  # Ваши администраторы
-
-# --- НАСТРОЙКА ЛОГГИНГА --- #
+# --- НАСТРОЙКА --- #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# --- БАЗА ДАННЫХ --- #
+ADMINS = [5634800132, 5515360616]  # Ваши ID администраторов
+
+# --- БАЗА ДАННЫХ (PostgreSQL) --- #
+def get_db_connection():
+    """Создает подключение к PostgreSQL"""
+    return psycopg2.connect(os.getenv('DATABASE_URL'), sslmode='require')
+
 def init_db():
-    """Инициализация базы данных"""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                mutation TEXT NOT NULL,
-                price INTEGER NOT NULL,
-                category TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                join_date TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS purchases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                pet_id INTEGER,
-                status TEXT DEFAULT 'pending',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(pet_id) REFERENCES pets(id)
-            )
-        """)
-        conn.commit()
+    """Инициализация таблиц"""
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Таблица питомцев
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pets (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    mutation TEXT NOT NULL,
+                    price INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Таблица пользователей
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Таблица покупок
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS purchases (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id),
+                    pet_id INTEGER REFERENCES pets(id),
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+        logger.info("✅ База данных инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка БД: {e}")
+        raise
 
 def add_user(user_id, username, first_name, last_name):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO users (id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+    """Добавление пользователя"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO users (id, username, first_name, last_name) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
             (user_id, username, first_name, last_name)
         )
+        conn.commit()
 
 def add_pet(name, mutation, price, category):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    """Добавление питомца"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
         cursor.execute(
-            "INSERT INTO pets (name, mutation, price, category) VALUES (?, ?, ?, ?)",
+            "INSERT INTO pets (name, mutation, price, category) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
             (name, mutation, price, category)
         )
+        pet_id = cursor.fetchone()[0]
         conn.commit()
-        return cursor.lastrowid
+        return pet_id
 
 def delete_pet(pet_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM pets WHERE id = ?", (pet_id,))
+    """Удаление питомца"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("DELETE FROM pets WHERE id = %s", (pet_id,))
         conn.commit()
         return cursor.rowcount > 0
 
 def get_pets_by_category(category):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pets WHERE category = ? ORDER BY name", (category,))
+    """Получение питомцев по категории"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT * FROM pets WHERE category = %s ORDER BY name",
+            (category,)
+        )
         return cursor.fetchall()
 
 def get_pet(pet_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+    """Получение питомца по ID"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT * FROM pets WHERE id = %s", (pet_id,))
         return cursor.fetchone()
 
 def get_all_pets():
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    """Получение всех питомцев"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
         cursor.execute("SELECT * FROM pets ORDER BY category, name")
         return cursor.fetchall()
 
 def create_purchase(user_id, pet_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    """Создание заказа"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
         cursor.execute(
-            "INSERT INTO purchases (user_id, pet_id) VALUES (?, ?)",
+            "INSERT INTO purchases (user_id, pet_id) VALUES (%s, %s) RETURNING id",
             (user_id, pet_id)
         )
+        purchase_id = cursor.fetchone()[0]
         conn.commit()
-        return cursor.lastrowid
+        return purchase_id
 
 # --- ОСНОВНЫЕ ФУНКЦИИ БОТА --- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,7 +197,7 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for pet in pets:
         btn_text = f"{pet[1]} ({pet[2]}) - {pet[3]}₽"
-        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"pet_{pet[0]}")])
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"pet_{pet[0]}"])
     
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="shop_menu")])
     
@@ -231,7 +247,7 @@ async def handle_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     purchase_id = create_purchase(user.id, pet_id)
     
-    bot = Bot(token=TOKEN)
+    bot = Bot(token=os.getenv('TOKEN'))
     
     # Уведомление всем админам
     for admin_id in ADMINS:
@@ -439,7 +455,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(os.getenv('TOKEN')).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
